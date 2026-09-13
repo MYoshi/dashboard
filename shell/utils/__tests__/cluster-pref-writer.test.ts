@@ -1,4 +1,4 @@
-import { prependRecent, recordClusterNavigation, reorderPinned } from '@shell/utils/cluster-pref-writer';
+import { movePinned, prependRecent, recordClusterNavigation } from '@shell/utils/cluster-pref-writer';
 import { CLUSTER, PINNED_CLUSTERS, RECENT_CLUSTERS, RECENT_CLUSTERS_FETCHED } from '@shell/store/prefs';
 import { BLANK_CLUSTER } from '@shell/store/store-types';
 
@@ -98,45 +98,42 @@ describe('fx: cluster-pref-writer', () => {
     };
   };
 
-  describe('reorderPinned', () => {
-    it('writes the dragged order to the pinned pref', () => {
-      const { key, apply } = reorderPinned(['c', 'a', 'b']);
+  describe('movePinned', () => {
+    // A drag says one thing: this cluster, this position. Writing the shelf's whole order instead asserted
+    // the rest of the list too, and overwrote an order another tab had already moved on to.
+    it('moves one cluster to one position, leaving the rest as the server has them', () => {
+      const { key, apply } = movePinned('d', 0, ['a', 'b', 'c', 'd']);
 
       expect(key).toBe(PINNED_CLUSTERS);
-      expect(apply(['a', 'b', 'c'])).toStrictEqual(['c', 'a', 'b']);
+      // Another tab left the pref like this while the shelf still showed [a, b, c, d].
+      expect(apply(['b', 'c', 'd', 'a'])).toStrictEqual(['d', 'b', 'c', 'a']);
     });
 
-    // `commitAndReconcile` re-runs this against the server's live value, so the transform meets a pref
-    // that may have moved on. A plain overwrite would undo whatever moved it.
-    it('keeps a cluster pinned elsewhere while the drag was in flight', () => {
-      const { apply } = reorderPinned(['c', 'a']);
-
-      // 'z' was pinned in another tab and was never on screen to be dragged, so it has no place in the
-      // dropped order to claim — it keeps its pin, at the end.
-      expect(apply(['a', 'c', 'z'])).toStrictEqual(['c', 'a', 'z']);
+    it('reorders as dropped when nothing else has changed', () => {
+      expect(movePinned('d', 0, ['a', 'b', 'c', 'd']).apply(['a', 'b', 'c', 'd'])).toStrictEqual(['d', 'a', 'b', 'c']);
+      expect(movePinned('a', 2, ['a', 'b', 'c']).apply(['a', 'b', 'c'])).toStrictEqual(['b', 'c', 'a']);
     });
 
     it('does not resurrect a cluster unpinned elsewhere while the drag was in flight', () => {
-      const { apply } = reorderPinned(['c', 'a', 'b']);
-
-      expect(apply(['a', 'c'])).toStrictEqual(['c', 'a']);
+      expect(movePinned('b', 0, ['a', 'b', 'c']).apply(['a', 'c'])).toStrictEqual(['a', 'c']);
     });
 
-    // The shelf never lists `local` — it has its own fixed slot above — so a reorder must carry it across
-    // rather than read its absence from the dragged ids as an unpin.
-    it('keeps a pinned cluster the shelf never showed', () => {
-      const { apply } = reorderPinned(['b', 'a']);
-
-      expect(apply(['local', 'a', 'b'])).toStrictEqual(['b', 'a', 'local']);
+    // `index` counts SHELF rows, and the shelf never lists `local` or a cluster whose data has not
+    // loaded. Counting those would drop the row in the wrong place — or, with one ahead of the target,
+    // leave the shelf exactly as it was and the drag doing nothing at all.
+    it('counts shelf rows, not the ids the shelf never showed', () => {
+      expect(movePinned('b', 0, ['a', 'b']).apply(['local', 'a', 'b'])).toStrictEqual(['local', 'b', 'a']);
+      expect(movePinned('a', 1, ['a', 'b']).apply(['a', 'hidden', 'b'])).toStrictEqual(['hidden', 'b', 'a']);
+      expect(movePinned('a', 1, ['a', 'b']).apply(['hidden', 'a', 'b'])).toStrictEqual(['hidden', 'b', 'a']);
     });
 
-    it.each([
-      ['undefined', undefined],
-      ['a non-array', 'nonsense'],
-    ])('survives a pref stored as %s', (_label, stored) => {
-      const { apply } = reorderPinned(['a']);
+    it('clamps a position past either end', () => {
+      expect(movePinned('a', 99, ['a', 'b', 'c']).apply(['a', 'b', 'c'])).toStrictEqual(['b', 'c', 'a']);
+      expect(movePinned('c', -5, ['a', 'b', 'c']).apply(['a', 'b', 'c'])).toStrictEqual(['c', 'a', 'b']);
+    });
 
-      expect(apply(stored as any)).toStrictEqual([]);
+    it('survives a pref stored as a non-array', () => {
+      expect(movePinned('a', 0, ['a']).apply(undefined as any)).toStrictEqual([]);
     });
   });
 

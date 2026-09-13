@@ -21,7 +21,7 @@ import sideNavService from '@shell/components/nav/TopLevelMenu.helper';
 import { debounce } from 'lodash';
 import { sameContents } from '@shell/utils/array';
 import { RcSeparator } from '@components/RcSeparator';
-import { commitAndReconcile, reorderPinned, reportPinWriteFailure } from '@shell/utils/cluster-pref-writer';
+import { commitAndReconcile, movePinned, reportPinWriteFailure } from '@shell/utils/cluster-pref-writer';
 
 const DRAG_THRESHOLD = 4;
 const DRAG_SCROLL_EDGE = 32;
@@ -860,7 +860,10 @@ export default {
 
       const started = this.dragStartOrder || [];
       const moved = !!this.dragOrder && this.dragOrder.some((id, i) => id !== started[i]);
-      const order = commit && moved ? [...this.dragOrder] : null;
+      // The one thing the drag decided: which row, and where it was dropped.
+      const drop = commit && moved ? {
+        id: this.dragId, index: this.dragOrder.indexOf(this.dragId), onShelf: [...this.dragOrder]
+      } : null;
 
       if (this.dragMoved) {
         const swallowClick = (e) => {
@@ -879,21 +882,19 @@ export default {
       this.dragId = null;
       this.dragOrder = null;
 
-      if (order) {
-        this.onShelfReorder(order);
+      if (drop) {
+        this.onShelfReorder(drop.id, drop.index, drop.onShelf);
       }
     },
 
     /**
-     * A shelf row was dropped in a new position. The shelf renders the pinned pref IN ORDER, so writing
-     * that order back is the whole reorder — the rows re-derive from the pref and stay where they were
-     * dropped. Optimistic, like pin/unpin, so the shelf never waits on the round trip, and reported the
-     * same way when the write fails so the user is not left with an order that silently reverts.
+     * A shelf row was dropped in a new position. Optimistic, like pin/unpin, so the shelf never waits on
+     * the round trip, and reported the same way when the write fails.
      */
-    onShelfReorder(orderedIds) {
+    onShelfReorder(id, index, onShelf) {
       const write = commitAndReconcile(
         (action, payload) => this.$store.dispatch(action, payload),
-        [reorderPinned(orderedIds)]
+        [movePinned(id, index, onShelf)]
       );
 
       return reportPinWriteFailure(this.$store, this.t, write);
