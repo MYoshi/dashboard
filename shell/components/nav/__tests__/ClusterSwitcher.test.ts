@@ -196,6 +196,48 @@ describe('component: ClusterSwitcher', () => {
       wrapper.unmount();
     });
 
+    // The panel's height follows its content, so every search used to move it twice: down to the matches,
+    // but through the height of the WHOLE ESTATE on the way, because that is what the skeleton was sized
+    // from. Narrowing three matches to one sent it 3 -> 20 -> 1. A search refines what is already there,
+    // so the skeleton now stands in at that size and the panel moves once, when the answer really differs.
+    describe('the skeleton standing in for a search', () => {
+      const estate = Array.from({ length: 20 }, (_, i) => cluster(`c${ i }`));
+
+      it('should stand in at the size of the list it replaces, not the estate', async() => {
+        const wrapper = mountSwitcher({
+          all: estate, clusterCount: 20, search: 'he', searchResults: [cluster('c1'), cluster('c2'), cluster('c3')]
+        });
+        const vm = wrapper.vm as any;
+
+        // Three matches on screen; refine the search and the request goes out.
+        expect(vm.skeletonRows).toBe(3);
+
+        await wrapper.setProps({ listLoading: true, search: 'her' } as any);
+
+        expect(vm.skeletonRows).toBe(3);
+      });
+
+      it('should still stand in at the estate size for the resting list', async() => {
+        const wrapper = mountSwitcher({
+          all: estate, clusterCount: 20, search: ''
+        });
+
+        await wrapper.setProps({ listLoading: true } as any);
+
+        expect((wrapper.vm as any).skeletonRows).toBe(20);
+      });
+
+      it('should never ask for nothing', async() => {
+        const wrapper = mountSwitcher({
+          all: [], clusterCount: 0, search: 'nothing-matches', searchResults: []
+        });
+
+        await wrapper.setProps({ listLoading: true } as any);
+
+        expect((wrapper.vm as any).skeletonRows).toBeGreaterThan(0);
+      });
+    });
+
     it('shows the skeleton while it is being fetched', async() => {
       const wrapper = mountSwitcher({
         local: cluster('local'), recent, all: [cluster('p1')], recentCount: recent.length

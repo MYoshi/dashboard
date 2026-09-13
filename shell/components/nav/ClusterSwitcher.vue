@@ -118,6 +118,22 @@ const SKELETON_FALLBACK_ROWS = 3;
 const estateSkeletonRows = computed<number>(() => Math.min(props.clusterCount || SKELETON_FALLBACK_ROWS, SWITCHER_PAGE_SIZE));
 const recentSkeletonRows = computed<number>(() => Math.min(props.recentCount, SWITCHER_MAX_RECENT));
 
+// How many rows the list was showing before this request started. Kept up to date whenever the list is
+// actually on screen, because by the time one is in flight `rows` has already emptied.
+const rowsOnScreen = ref<number>(0);
+
+watch([() => props.listLoading, rows], () => {
+  if (!props.listLoading) {
+    rowsOnScreen.value = rows.value.length;
+  }
+}, { immediate: true });
+
+// A search is a REFINEMENT of what is already there, so the skeleton stands in at that size: narrowing
+// three matches to one should move the panel once, not send it through the height of the whole estate and
+// back. The estate's own count is still right for the resting list, which is what the skeleton replaces
+// when the panel opens or the list is refetched.
+const skeletonRows = computed<number>(() => (searching.value ? Math.max(1, Math.min(rowsOnScreen.value || SKELETON_FALLBACK_ROWS, SWITCHER_PAGE_SIZE)) : estateSkeletonRows.value));
+
 const showingSkeleton = computed<boolean>(() => props.listLoading);
 
 // Nothing for `fillViewport` to measure — topping up here would ask for page 2 of a list whose page 1
@@ -783,7 +799,7 @@ defineExpose({
                  away, and a list about to be replaced should not sit there looking like the answer. -->
           <ClusterSwitcherSkeleton
             v-if="showingSkeleton"
-            :rows="estateSkeletonRows"
+            :rows="skeletonRows"
           />
           <!-- Page 1 failed. Said plainly, because the alternative — the skeleton, forever — reads as a
                slow request that is still coming, and the caption above goes on asserting a total for a
