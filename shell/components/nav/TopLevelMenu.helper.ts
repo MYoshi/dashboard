@@ -6,18 +6,14 @@ import { STORE } from '@shell/store/store-types';
 import { ActionFindPageArgs } from '@shell/types/store/dashboard-store.types';
 import { PaginationParam, PaginationParamFilter, PaginationSort } from '@shell/types/store/pagination.types';
 import { VuexStore } from '@shell/types/store/vuex';
-import { filterHiddenLocalCluster, filterOnlyKubernetesClusters, isLocalClusterHidden, paginationFilterClusters } from '@shell/utils/cluster';
+import { clusterFilterSignature, filterHiddenLocalCluster, filterOnlyKubernetesClusters, paginationFilterClusters } from '@shell/utils/cluster';
 import PaginationWrapper from '@shell/utils/pagination-wrapper';
 import { sortBy } from '@shell/utils/sort';
 import { reactive } from 'vue';
 import { LocationAsRelativeRaw } from 'vue-router';
 
-/**
- * The head of the visit log, in visit order. `max` is the caller's — the fetch asks for more ids than the
- * flyout shows, because an id can stop resolving — so it is required rather than defaulted to one of the
- * two. Pinned clusters are NOT held back: pinning says to keep something to hand, not to erase where it
- * sits in the history, so a cluster can appear under both headings.
- */
+/** The head of the visit log, in visit order. Pinned clusters are not held back — a cluster can appear
+ * under both headings. */
 export function visibleRecentClusters(recents: string[] = [], max: number): string[] {
   return (Array.isArray(recents) ? recents : []).slice(0, max);
 }
@@ -54,10 +50,7 @@ interface UpdateArgs {
   provClusterRevision?: string,
 }
 
-/**
- * Order `clusters` by their position in `ids`, drop any not in `ids`, and cap — so a shelf renders in
- * the pref's recorded order rather than the API's default sort.
- */
+/** Order by position in `ids`, drop the rest, cap — so a shelf follows the pref, not the API's sort. */
 function orderByIdsAndCap(clusters: TopLevelMenuCluster[], ids: string[] = [], max: number): TopLevelMenuCluster[] {
   const byId = new Map(clusters.map((c) => [c.id, c]));
 
@@ -90,10 +83,8 @@ type ProvCluster = {
   [key: string]: any
 }
 
-// A count request that fails takes the switcher's door down with it, and nothing else re-triggers on an
-// unchanged cluster count — so a blip would hide the switcher for the rest of the session. Retried on a
-// widening delay instead, with no attempt limit: giving up is what makes an outage permanent, and the
-// delay ceiling keeps a lasting one down to a single page-size-1 request a minute.
+// Nothing else re-triggers on an unchanged count, so a failure must retry itself or the switcher's door
+// stays down for the session. No attempt limit: giving up is what would make an outage permanent.
 const COUNT_RETRY_DELAY = 2000;
 const COUNT_RETRY_MAX_DELAY = 60000;
 
@@ -156,12 +147,7 @@ export interface TopLevelMenuHelper {
   /** The `local` cluster, fetched by its own request as the fixed top tile (every other slice filters it out). */
   clustersLocal: Array<TopLevelMenuCluster>;
 
-  /**
-   * `others` — server-side total for the ALL list; the UI compares loaded length against it to know if more
-   * remain, and it follows the search term.
-   * `browsable` — how many clusters the ALL list holds when nothing is being searched for. Counted WITHOUT
-   * `local` (it has its own fixed tile), so the switcher's chip is this outright.
-   */
+  /** `others` follows the search term; `browsable` is the resting total, always without `local`. */
   counts: { others: number, browsable: number };
 
   /** Flip every cached cluster's `pinned` flag from the pinned pref (keeps the pin icon in sync). */
@@ -188,10 +174,8 @@ export interface TopLevelMenuHelper {
 export abstract class BaseTopLevelMenuHelper {
   protected $store: VuexStore;
 
-  // Every fetched cluster, id-keyed. The pinned/recent/local shelf slices are DERIVED from this cache ×
-  // the prefs, so membership + order always follow the pref and the fetch only supplies live row data.
-  // The PREF is not watched, though: a cluster pinned in another tab reaches this shelf when this tab next
-  // writes a preference of its own, or on reload.
+  // Every fetched cluster, id-keyed. The shelf slices are DERIVED from this × the prefs, so order follows
+  // the pref. The pref is not watched: another tab's pin arrives on this tab's next write, or on reload.
   protected clusterCache: Record<string, TopLevelMenuCluster> = reactive({});
 
   private get pinnedPref(): string[] {
@@ -313,11 +297,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
   private recentSeq = 0;
   private othersPage = 1;
   private othersPages = 0;
-  // How many page-1 resets are in flight. `loadMoreOthers` stands down while any is: taking the sequence
-  // token below would make that reset's own response stale, so its page 1 would be discarded and the
-  // load-more's page appended to the very list the reset was meant to replace. A COUNT, not a flag —
-  // successive searches overlap, and a boolean would let the first reset to settle unlock the load-more
-  // while a newer one is still open.
+  // Page-1 resets in flight. A load-more during one would take the sequence token and strand the reset's
+  // own page. A COUNT, not a flag: searches overlap, and a boolean would unlock on the first to settle.
   private othersResetting = 0;
 
   // Monotonic token for the ALL list: a search `resetOthers` and a scroll `loadMoreOthers` can be in
@@ -326,7 +307,7 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
 
   // The inputs the counts below were last successfully fetched for; `null` until they have been.
   private clusterCount: number | null = null;
-  private countHidesLocal: boolean | null = null;
+  private countFilters: string | null = null;
   private countRetries = 0;
   private countRetryTimer: ReturnType<typeof setTimeout> | undefined;
   // Monotonic token for the counts, as for the lists above: a refresh and a retry can be in flight
@@ -391,12 +372,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
     });
   }
 
-  /**
-   * Fetch the "context" set — local + pinned — in ONE `id IN (...)` query. The only watched request: its
-   * onChange re-runs this to keep those rows live, which they have to be because the nav shows them for
-   * as long as it is on screen. Converted rows upsert into the shared cache; the shelf slices are derived
-   * from that cache, so there's nothing to seed or split here.
-   */
+  /** local + pinned in ONE id-IN query — the only watched request, because the nav shows those rows for
+   * as long as it is open. Rows upsert into the shared cache; the slices derive from it. */
   private async updateContext(args: UpdateArgs): Promise<void> {
     const pinnedIds = args.pinnedIds || [];
     // Union of the ids we care about (deduped); `local` is always present.
@@ -440,11 +417,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
     return this.recentClusters;
   }
 
-  /**
-   * Fetch RECENTLY USED: the stored visit log, resolved in one id-IN query and cut to what the flyout
-   * shows. Asks for more ids than it shows because an id can stop resolving — the cluster was deleted, or
-   * access was lost — and takes the first that come back, in visit order.
-   */
+  /** The visit log resolved in one id-IN query. Asks for more ids than it shows, because one can stop
+   * resolving — deleted, or access lost — and takes the first that come back. */
   public async refreshRecent(): Promise<void> {
     const recentIds = visibleRecentClusters(this.recentPref, RECENT_CLUSTERS_FETCHED);
     const seq = ++this.recentSeq;
@@ -484,10 +458,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
     this.recentClusters.push(...orderByIdsAndCap(found, recentIds, SWITCHER_MAX_RECENT));
   }
 
-  // ---------- requests ----------
-  // Refreshes ONLY the watched context set (local + pinned); called on init and every pin/unpin/visit.
-  // The ALL list is fetched separately by `resetOthers`/`loadMoreOthers` on open/scroll, so a pin doesn't
-  // re-page it.
+  // Refreshes ONLY the watched context set (local + pinned). The ALL list is fetched separately on
+  // open/scroll, so a pin doesn't re-page it.
   async update(args: UpdateArgs) {
     this.args = args;
 
@@ -550,10 +522,7 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
     return filters;
   }
 
-  /**
-   * Fetch one fixed-size page of the ALL list, either replacing (reset → page 1) or appending
-   * (loadMore → next page) the accumulated rows. `local` is excluded; no pinned-exclusion (railAll dedupes).
-   */
+  /** One page of the ALL list: replacing on reset, appending on load-more. `local` is excluded. */
   private async fetchOthers(reset: boolean): Promise<void> {
     const args = this.args;
 
@@ -594,10 +563,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
         }
       });
     } catch (e) {
-      // The counter moved BEFORE the request; leaving it moved would make the next scroll ask for page
-      // N+1 and skip page N for the lifetime of the flyout — a whole page of clusters silently missing
-      // from ALL CLUSTERS. Put it back so the retry re-requests the page that failed — but only if no
-      // newer fetch has since claimed the counter, or this failure would rewind ITS page.
+      // The counter moved before the request, so leaving it moved skips a page for the life of the
+      // flyout. Put it back — unless a newer fetch has claimed it, or this failure rewinds ITS page.
       if (seq === this.othersSeq) {
         this.othersPage = previousPage;
       }
@@ -637,12 +604,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
     });
   }
 
-  /**
-   * Append the next page of the ALL list (infinite scroll). Skipped while a page-1 reset is in flight —
-   * a reset replaces the whole list, so an older-intent load-more must not outrank it. `ClusterSwitcher`'s
-   * `fillViewport` makes the overlap reachable: it emits `load-more` as soon as the loaded rows don't fill
-   * the scroller, which is exactly the state right after `onFlyoutOpen` calls `resetOthersList`.
-   */
+  /** The next page. Skipped while a page-1 reset is in flight — `fillViewport` emits `load-more` as soon
+   * as the rows don't fill the scroller, which is exactly the state a reset leaves behind. */
   public loadMoreOthers(): Promise<void> {
     if (this.othersResetting > 0) {
       return Promise.resolve();
@@ -652,22 +615,19 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
   }
 
   /**
-   * Refresh both cluster totals. They answer different questions and must stay independent — deriving one
-   * from the other is what made the switcher's chip move when `hide-local-cluster` was toggled.
+   * Both cluster totals, kept independent — deriving one from the other is what made the chip move when
+   * `hide-local-cluster` was toggled.
    *
-   * 1. The SHARED saved count, which the home page and the Cluster Management nav badge read as well: it
-   *    counts what THOSE surfaces list — everything the user can see, `local` included, minus whatever the
-   *    environment hides (Harvester, and `local` itself when hide-local is on).
-   * 2. The switcher's own `counts.browsable`: the same query with `local` ALWAYS excluded, because the
-   *    flyout's list never carries it (it has its own fixed tile above). Excluding it unconditionally is
-   *    what makes this total the chip's number outright, and immune to the hide-local setting.
+   * 1. The SHARED saved count the home page and the Cluster Management badge also read: `local` included.
+   * 2. The switcher's own `counts.browsable`: the same query with `local` ALWAYS excluded, which is what
+   *    makes it the chip's number outright rather than something to subtract from.
    */
   public async updateCount(count: number) {
-    // `hide-local-cluster` is one of the shared count's filters, so flipping it changes that answer even
-    // when the number of clusters has not moved — both belong in the guard.
-    const hidesLocal = isLocalClusterHidden(this.$store);
+    // The number of clusters is half the answer; what the environment COUNTS as one is the other half,
+    // and it moves the total without moving the number. Comparing the filters covers the next one too.
+    const filters = clusterFilterSignature({ getters: this.$store.getters });
 
-    if (count === this.clusterCount && hidesLocal === this.countHidesLocal) {
+    if (count === this.clusterCount && filters === this.countFilters) {
       return;
     }
 
@@ -680,8 +640,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
   private async fetchCounts(count: number): Promise<void> {
     const seq = ++this.countSeq;
     // Read at request time rather than carried in from the caller: a retry can fire long after it was
-    // scheduled, and what gets recorded below has to be the setting the requests actually went out with.
-    const hidesLocal = isLocalClusterHidden(this.$store);
+    // scheduled, and what gets recorded below has to be the filters the requests actually went out with.
+    const filters = clusterFilterSignature({ getters: this.$store.getters });
 
     const countPage = (filters: PaginationParam[], saveCountAs?: string): ActionFindPageArgs => ({
       pagination: {
@@ -695,12 +655,8 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
       saveCountAs,
     });
 
-    // No early return on an empty filter set: a count saved while the filters were NOT empty stays behind
-    // and outlives the change, so consumers keep reading a filtered total for an unfiltered estate. The
-    // page-size-1 requests below refresh it either way.
-    //
-    // Settled, not `all`: the two answer different questions, so one failing is no reason to throw away
-    // the other's answer — and the switcher's door hangs off the second one.
+    // No early return on an empty filter set, or a count saved while they were NOT empty outlives them.
+    // Settled, not `all`: one failing is no reason to discard the other, and the door hangs off the second.
     const [shared, browsable] = await Promise.allSettled([
       this.$store.dispatch('management/findPage', {
         type: MANAGEMENT.CLUSTER,
@@ -731,7 +687,7 @@ export class TopLevelMenuHelperPagination extends BaseTopLevelMenuHelper impleme
       // single failed request into a permanent one: every later call matched the guard and returned, so
       // nothing ever asked again.
       this.clusterCount = count;
-      this.countHidesLocal = hidesLocal;
+      this.countFilters = filters;
       this.countRetries = 0;
 
       return;
@@ -777,12 +733,8 @@ export class TopLevelMenuHelperLegacy extends BaseTopLevelMenuHelper implements 
     const clusters = this.updateClusters();
     const nonLocal = clusters.filter((c) => !c.isLocal);
 
-    // Prune deleted clusters: legacy holds the full live estate in memory, so any cached row no longer
-    // present was removed — drop it so it leaves the derived pinned shelf. `local` is exempt only
-    // until the estate has actually loaded (an empty list is "not fetched yet", not "local is gone"); once
-    // it has, `local` goes the same way as any other missing id — matching the pagination helper, whose
-    // `updateContext` prunes it when `hide-local-cluster` filters it out. Consumers read
-    // `clustersLocal` as the source of truth for local access, so the two must not diverge.
+    // Legacy holds the whole estate in memory, so a cached row that is gone was deleted — drop it.
+    // `local` is exempt only until the estate has loaded: an empty list is "not fetched yet".
     const liveIds = new Set(clusters.map((c) => c.id));
 
     Object.keys(this.clusterCache).forEach((id) => {

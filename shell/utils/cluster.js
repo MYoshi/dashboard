@@ -48,6 +48,22 @@ export function paginationFilterClusters(store, filterMgmtCluster = true) {
 }
 
 /**
+ * A stable fingerprint of the filters every cluster query is built with.
+ *
+ * The number of clusters is not enough to know whether a cached cluster count is still right: the answer
+ * also moves when the ENVIRONMENT changes what counts — `hide-local-cluster` being switched on, or the
+ * Harvester feature flag being flipped — and neither of those touches the number. Comparing this tells a
+ * caller the question itself has changed, without having to know which filters exist.
+ *
+ * @export
+ * @param {*} store
+ * @returns string
+ */
+export function clusterFilterSignature(store, filterMgmtCluster = true) {
+  return JSON.stringify(paginationFilterClusters(store, filterMgmtCluster));
+}
+
+/**
  * The vai backed api's `filter` equivalent of `filterHiddenLocalCluster`
  *
  * @export

@@ -5,7 +5,7 @@ import ClusterSwitcher from '@shell/components/nav/ClusterSwitcher';
 import IconOrSvg from '../IconOrSvg';
 import { mapGetters } from 'vuex';
 import { CAPI, COUNT, MANAGEMENT } from '@shell/config/types';
-import { isLocalClusterHidden } from '@shell/utils/cluster';
+import { clusterFilterSignature, isLocalClusterHidden } from '@shell/utils/cluster';
 import { PINNED_CLUSTERS, RECENT_CLUSTERS } from '@shell/store/prefs';
 import { BLANK_CLUSTER } from '@shell/store/store-types';
 import { sortBy } from '@shell/utils/sort';
@@ -433,6 +433,13 @@ export default {
       return isLocalClusterHidden(this.$store);
     },
 
+    // What the environment currently counts as a cluster. Not derived from the clusters themselves: it
+    // moves when `hide-local-cluster` or the Harvester feature flag moves, and neither of those changes
+    // how many there are — so nothing else would notice the totals had gone stale.
+    clusterFilters() {
+      return clusterFilterSignature(this.$store);
+    },
+
     clusterCountsFromCounts() {
       const counts = this.$store.getters[`management/all`](COUNT)?.[0]?.counts || {};
 
@@ -516,8 +523,12 @@ export default {
 
     hideLocalCluster() {
       this.updateClusters(this.pinnedIds, 'slow');
-      // The setting is one of the SHARED count's filters, so that count is now wrong for the home page and
-      // the Cluster Management badge even though no cluster has come or gone.
+    },
+
+    // The saved count and the switcher's own are both fetched WITH these filters, so changing them makes
+    // both answers wrong for the home page, the Cluster Management badge and the chip — while the number
+    // of clusters sits still and nothing else asks again.
+    clusterFilters() {
       this.helper.updateCount(this.clusterCountsFromCounts);
     },
 

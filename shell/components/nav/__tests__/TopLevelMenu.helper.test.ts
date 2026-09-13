@@ -2,7 +2,7 @@ import TopLevelMenuHelperService, { TopLevelMenuHelperLegacy, TopLevelMenuHelper
 import { CAPI, MANAGEMENT, SAVED_COUNTS } from '@shell/config/types';
 import PaginationWrapper from '@shell/utils/pagination-wrapper';
 import { RECENT_CLUSTERS_FETCHED } from '@shell/store/prefs';
-import { filterHiddenLocalCluster, isLocalClusterHidden } from '@shell/utils/cluster';
+import { clusterFilterSignature, filterHiddenLocalCluster, isLocalClusterHidden } from '@shell/utils/cluster';
 
 // Mock dependencies
 jest.mock('@shell/utils/pagination-wrapper');
@@ -11,6 +11,7 @@ jest.mock('@shell/utils/cluster', () => ({
   filterOnlyKubernetesClusters: jest.fn((clusters) => clusters),
   paginationFilterClusters:     jest.fn(() => []),
   isLocalClusterHidden:         jest.fn(() => false),
+  clusterFilterSignature:       jest.fn(() => '[]'),
 }));
 
 describe('topLevelMenu.helper', () => {
@@ -21,6 +22,7 @@ describe('topLevelMenu.helper', () => {
 
   beforeEach(() => {
     (isLocalClusterHidden as jest.Mock).mockReturnValue(false);
+    (clusterFilterSignature as jest.Mock).mockReturnValue('[]');
     (filterHiddenLocalCluster as jest.Mock).mockImplementation((clusters) => clusters);
     prefsData = { 'pinned-clusters': [], 'recent-clusters': [] };
     mockStore = {
@@ -535,10 +537,10 @@ describe('topLevelMenu.helper', () => {
       expect(hidden.browsable).toBe(22);
     });
 
-    // `hide-local-cluster` is one of the shared count's filters, so flipping it changes that answer while
-    // leaving the number of clusters alone. Guarding on the number only left the shared count behind for
-    // the home page and the Cluster Management badge.
-    it('re-fetches when hide-local-cluster flips, on an unchanged cluster count', async() => {
+    // What the environment counts as a cluster is the other half of the answer: `hide-local-cluster` and
+    // the Harvester feature flag both change the total without changing how many clusters there are.
+    // Guarding on the number alone left the counts behind for the home page, the badge and the chip.
+    it('re-fetches when the filters change, on an unchanged cluster count', async() => {
       mockStore.getters['management/schemaFor'].mockReturnValue(true);
 
       const helper = new TopLevelMenuHelperPagination({ $store: mockStore });
@@ -552,7 +554,7 @@ describe('topLevelMenu.helper', () => {
       await helper.updateCount(7);
       expect(countRequests()).toHaveLength(2);
 
-      (isLocalClusterHidden as jest.Mock).mockReturnValue(true);
+      (clusterFilterSignature as jest.Mock).mockReturnValue('[{"harvester":"hidden"}]');
       await helper.updateCount(7);
       expect(countRequests()).toHaveLength(4);
     });
@@ -708,27 +710,27 @@ describe('topLevelMenu.helper', () => {
         helper.destroy();
       });
 
-      // A retry can fire long after it was scheduled. What it records has to be the setting its requests
-      // actually went out with, or the guard swallows the refresh for the setting now in effect.
-      it('records the hide-local state the retry actually fetched with', async() => {
+      // A retry can fire long after it was scheduled. What it records has to be the filters its requests
+      // actually went out with, or the guard swallows the refresh for the filters now in effect.
+      it('records the filters the retry actually fetched with', async() => {
         const helper = new TopLevelMenuHelperPagination({ $store: mockStore });
 
         mockStore.dispatch.mockImplementation(halfFailing());
         await helper.updateCount(23);
 
-        // The setting flips while the retry is pending, and the retry is what succeeds.
-        (isLocalClusterHidden as jest.Mock).mockReturnValue(true);
+        // The filters change while the retry is pending, and the retry is what succeeds.
+        (clusterFilterSignature as jest.Mock).mockReturnValue('[{"harvester":"hidden"}]');
         mockStore.dispatch.mockResolvedValue({ data: [], pagination: { result: { count: 22 } } });
         await jest.advanceTimersByTimeAsync(2000);
 
         const settled = countRequests().length;
 
-        // Same count, and hide-local is still on: already answered, nothing to ask.
+        // Same count, same filters: already answered, nothing to ask.
         await helper.updateCount(23);
         expect(countRequests()).toHaveLength(settled);
 
-        // Flip it back and it must ask again.
-        (isLocalClusterHidden as jest.Mock).mockReturnValue(false);
+        // Change them back and it must ask again.
+        (clusterFilterSignature as jest.Mock).mockReturnValue('[]');
         await helper.updateCount(23);
         expect(countRequests().length).toBeGreaterThan(settled);
 

@@ -667,6 +667,48 @@ describe('topLevelMenu', () => {
     });
   });
 
+  // The counts are fetched WITH the environment's cluster filters, so changing one makes every total wrong
+  // — the home page card, the Cluster Management badge and the chip — while the number of clusters sits
+  // still. `hide-local-cluster` was found this way in review; the Harvester feature flag is the same
+  // input and had nothing watching it at all.
+  describe('when the environment changes what counts as a cluster', () => {
+    const mountWithFilters = (harvester: boolean) => {
+      const store = generateStore([
+        {
+          id: 'an-id1', mgmt: { id: 'an-id1' }, nameDisplay: 'a-cluster', canExplore: true
+        },
+      ]);
+
+      store.getters['features/get'] = jest.fn(() => harvester);
+
+      return mount(TopLevelMenu, {
+        global: {
+          mocks: { $route: {}, $store: { ...store } },
+          stubs: ['BrandImage', 'router-link'],
+        },
+      });
+    };
+
+    // Reactivity itself is Vuex's and cannot be shown against this plain-object store, so the two halves
+    // are checked separately: that the signature moves when the environment does, and that the watcher on
+    // it asks for the counts again.
+    it('should re-read the counts when the filters move', () => {
+      const updateCount = jest.fn();
+
+      (TopLevelMenu as any).watch.clusterFilters.call({ helper: { updateCount }, clusterCountsFromCounts: 7 });
+
+      expect(updateCount).toHaveBeenCalledWith(7);
+    });
+
+    it('should give the same filters the same signature', () => {
+      const a = mountWithFilters(false);
+      const b = mountWithFilters(false);
+
+      expect((a.vm as any).clusterFilters).toBe((b.vm as any).clusterFilters);
+      expect((mountWithFilters(true).vm as any).clusterFilters).not.toBe((a.vm as any).clusterFilters);
+    });
+  });
+
   describe('the cluster-switcher trigger', () => {
     const twoClusters = [
       {
