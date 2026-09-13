@@ -1628,8 +1628,16 @@ export default {
   // The nav and the cluster-switcher flyout open on top of each other, so they open and close at the same
   // speed — two durations that differ read as two separate animations. These mirror
   // $flyout-open-duration / $flyout-close-duration in ClusterSwitcher.vue; change them together.
-  $nav-open-duration: 0.25s;
-  $nav-close-duration: 0.2s;
+  // Shorter than the flyout's, deliberately. The nav slides 230px where the flyout wipes most of the
+  // viewport, so matching their DURATIONS gave them wildly different speeds — about 920px/s against
+  // 3,500px/s — and the one covering less ground is the one that looks like it is wading. Scaled so the
+  // two move at a comparable rate instead, keeping the flyout's 1.25 open-to-close ratio.
+  $nav-open-duration: 0.15s;
+  $nav-close-duration: 0.12s;
+  // The flyout wipes at a constant rate, so the nav moves at one too. Matching only the durations left
+  // them finishing together but travelling differently: the CSS default `ease` is 80% of the way there by
+  // the halfway point and then creeps the rest, which reads as still settling once the flyout has stopped.
+  $nav-easing: linear;
 
   @mixin icon-hover-square {
     box-sizing: border-box;
@@ -1904,7 +1912,7 @@ export default {
     flex-direction: column;
     padding: 0;
     overflow: hidden;
-    transition: width $nav-open-duration;
+    transition: width $nav-open-duration $nav-easing;
 
     &:focus, &:focus-visible {
       outline: 0;
@@ -2244,7 +2252,7 @@ export default {
           text-transform: uppercase;
 
           span {
-            transition: opacity $nav-open-duration ease-in-out;
+            transition: opacity $nav-open-duration $nav-easing;
             display: flex;
             max-height: 16px;
           }
@@ -2291,17 +2299,17 @@ export default {
     }
 
     &.menu-close {
-      transition: width $nav-close-duration;
+      transition: width $nav-close-duration $nav-easing;
 
       .side-menu-logo  {
         opacity: 0;
-        transition: all $nav-close-duration;
+        transition: all $nav-close-duration $nav-easing;
       }
       .category {
         &-title {
           span {
             opacity: 0;
-            transition: opacity $nav-close-duration ease-in-out;
+            transition: opacity $nav-close-duration $nav-easing;
           }
 
           hr {
@@ -2367,7 +2375,7 @@ export default {
     max-width: 200px;
     width: 100%;
     justify-content: center;
-    transition: all $nav-open-duration;
+    transition: all $nav-open-duration $nav-easing;
     overflow: hidden;
     & IMG {
       object-fit: contain;
@@ -2376,22 +2384,6 @@ export default {
     }
   }
 
-  .fade-enter-active, .fade-leave-active {
-    transition: all $nav-open-duration;
-    transition-timing-function: ease;
-  }
-
-  .fade-leave-active {
-    transition: all $nav-close-duration;
-  }
-
-  .fade-leave-to {
-    left: -$app-bar-expanded-width;
-  }
-
-  .fade-enter {
-    left: -$app-bar-expanded-width;
-  }
 
   .locale-chooser {
     cursor: pointer;
