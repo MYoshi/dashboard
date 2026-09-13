@@ -20,7 +20,7 @@ import {
   RECENT_CLUSTERS,
   enqueuePreferenceWrite,
 } from '@shell/store/prefs';
-import { commitAndReconcile, prependRecent } from '@shell/utils/cluster-pref-writer';
+import { commitAndReconcile, movePinned, prependRecent } from '@shell/utils/cluster-pref-writer';
 
 describe('prefs store', () => {
   describe('create', () => {
@@ -785,7 +785,7 @@ describe('prefs store', () => {
         expect(cookieSetCall).toBeUndefined();
       });
 
-      it('reads the document without committing when logged in and asUserPreference is true', async() => {
+      it('reads the document when logged in and asUserPreference is true', async() => {
         const s = state();
         const commit = jest.fn();
         const serverObj = { data: {}, save: jest.fn().mockResolvedValue(undefined) };
@@ -797,7 +797,7 @@ describe('prefs store', () => {
           dispatch, commit, rootGetters, state: s
         } as any, { key: ROWS_PER_PAGE, value: 25 });
 
-        expect(dispatch).toHaveBeenCalledWith('readServer');
+        expect(dispatch).toHaveBeenCalledWith('loadServer');
       });
 
       it('writes mangleWrite-transformed value to server.data, json-stringified due to parseJSON', async() => {
@@ -963,7 +963,7 @@ describe('prefs store', () => {
         const { commit, dispatch } = await run(['b'], ['b'], prepend('a'));
 
         expect(commit).toHaveBeenCalledWith('load', { key: RECENT_CLUSTERS, value: ['a', 'b'] });
-        expect(dispatch).toHaveBeenCalledWith('readServer');
+        expect(dispatch).toHaveBeenCalledWith('loadServer');
       });
 
       it('phase 2: when client === server, persists the reconciled value with no divergent re-commit', async() => {
@@ -1394,6 +1394,79 @@ describe('prefs store', () => {
       });
     });
 
+    // Preferences are not watched, so another tab's change arrives on this tab's next write. That has to
+    // hold for every key, not just the one being written: reordering the shelf in one tab and then merely
+    // visiting a cluster in the other left the second tab showing the old order indefinitely.
+    describe('picking up another tab', () => {
+      const twoTabs = (initial: Record<string, any>) => {
+        let backend = { ...initial };
+        const tab = () => {
+          const server: any = {
+            data: {},
+            save: jest.fn(() => {
+              const body = { ...server.data };
+
+              return new Promise<void>((resolve) => setTimeout(() => {
+                backend = { ...body };
+                resolve();
+              }, 0));
+            }),
+          };
+          const s: any = state();
+
+          Object.entries(initial).forEach(([k, v]) => {
+            s.data[k] = JSON.parse(v as string);
+          });
+          const commit = jest.fn((name: string, payload: any) => {
+            if (name === 'load') {
+              s.data[payload.key] = payload.value;
+            }
+          });
+          const ctx: any = {
+            state: s, commit, rootGetters: { 'auth/loggedIn': true }, rootState: {}
+          };
+          const dispatch: any = (action: string, payload?: any) => {
+            switch (action) {
+            case 'management/findAll':
+              server.data = { ...backend };
+
+              return Promise.resolve([server]);
+            case 'loadServer':
+              return actions.loadServer({ ...ctx, dispatch }, payload);
+            case 'prefs/applyPrefsOptimistic':
+              return Promise.resolve(actions.applyPrefsOptimistic(ctx, payload));
+            case 'prefs/reconcilePrefs':
+              return actions.reconcilePrefs({ ...ctx, dispatch }, payload);
+            default:
+              return Promise.resolve();
+            }
+          };
+
+          return { dispatch, sees: () => s.data[PINNED_CLUSTERS] };
+        };
+
+        return { tab, onServer: () => JSON.parse(backend[PINNED_CLUSTERS]) };
+      };
+
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+      it('should adopt a reorder made elsewhere, even when writing a different preference', async() => {
+        const world = twoTabs({ [PINNED_CLUSTERS]: JSON.stringify(['a', 'b']), [RECENT_CLUSTERS]: JSON.stringify([]) });
+        const first = world.tab();
+        const second = world.tab();
+
+        await commitAndReconcile(first.dispatch, [movePinned('b', 0, ['a', 'b'])]);
+        await settle();
+
+        // The second tab only records a visit — it never touches the pinned pref.
+        await commitAndReconcile(second.dispatch, [prependRecent('heron')]);
+        await settle();
+
+        expect(second.sees()).toStrictEqual(['b', 'a']);
+        expect(second.sees()).toStrictEqual(world.onServer());
+      });
+    });
+
     // A write in flight is a read in flight, and `loadServer` commits the server's value for every
     // preference it reads. Mid-write that is wrong: a value committed optimistically for some OTHER key,
     // still on its way to the server, was replaced by the copy the server last saw — so the shelf reverted
@@ -1433,8 +1506,6 @@ describe('prefs store', () => {
             return Promise.resolve([server]);
           case 'loadServer':
             return actions.loadServer({ ...ctx, dispatch }, payload);
-          case 'readServer':
-            return actions.readServer({ ...ctx, dispatch });
           case 'prefs/applyPrefsOptimistic':
             return Promise.resolve(actions.applyPrefsOptimistic(ctx, payload));
           case 'prefs/reconcilePrefs':
@@ -1470,25 +1541,31 @@ describe('prefs store', () => {
         expect([...new Set(seen)]).toStrictEqual(['["heron","local"]']);
       });
 
-      // The boot load is the one read that SHOULD commit everything — loading the preferences is its job —
-      // so it can still land on an optimistic value, and the router runs it alongside the cluster load.
-      // That is what the reconcile's own guard is for.
-      it('should recover an optimistic value the boot load legitimately overwrote', async() => {
+      // The boot load commits every preference it reads — that is its job — and the router runs it
+      // alongside the cluster load, so it lands mid-write. Not on a key with a write in flight, though:
+      // the server's copy of that one is older than what is already on its way there.
+      it('should not overwrite a value with a write in flight', async() => {
         const { s, dispatch, onServer } = twoWriters();
 
         const boot = actions.loadServerQueued({ dispatch } as any);
         const visit = commitAndReconcile(dispatch, [prependRecent('heron')]);
+        const seen: string[] = [];
 
+        // Sampled rather than checked at the end: the reconcile would put a stomped value back, so only
+        // watching it throughout shows whether it was ever taken away.
+        for (let i = 0; i < 8; i++) {
+          await Promise.resolve();
+          seen.push(JSON.stringify(s.data[RECENT_CLUSTERS]));
+        }
         await Promise.all([boot, visit]);
         await new Promise((resolve) => setTimeout(resolve, 10));
 
+        expect([...new Set(seen)]).toStrictEqual(['["heron","local"]']);
         expect(s.data[RECENT_CLUSTERS]).toStrictEqual(['heron', 'local']);
         expect(onServer()).toStrictEqual(['heron', 'local']);
       });
 
-      // And if something does revert it, the reconcile has to put it back. It used to compare against the
-      // value it had committed optimistically, which agreed with itself and skipped the commit — leaving
-      // the store showing one thing and the server holding another, until the next write or a reload.
+      // Whatever happened meanwhile, the reconcile ends by leaving the store holding what it persisted.
       it('should leave the store agreeing with what it persisted', async() => {
         const { s, dispatch, onServer } = twoWriters();
 
@@ -1640,8 +1717,6 @@ describe('prefs store', () => {
             return Promise.resolve([server]);
           case 'loadServer':
             return actions.loadServer({ ...ctx, dispatch }, payload);
-          case 'readServer':
-            return actions.readServer({ ...ctx, dispatch });
           case 'prefs/applyPrefsOptimistic':
             return Promise.resolve(actions.applyPrefsOptimistic(ctx, payload));
           case 'prefs/reconcilePrefs':

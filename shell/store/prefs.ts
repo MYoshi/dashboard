@@ -355,6 +355,11 @@ export const mutations = {
  *
  * A task must not itself write a preference, or it would wait on the queue it is holding.
  */
+// Keys with a local write in flight. A read taken mid-write must not commit the server's copy over one of
+// these — it is older than what we are about to send — but every OTHER key is free to refresh, which is
+// how a change made in another tab reaches this one.
+const pendingWrites = new Set<string>();
+
 let writeChain: Promise<any> = Promise.resolve();
 
 /**
@@ -429,8 +434,10 @@ export const actions = {
 
       // Queued: this is a get-before-set on the shared Preference, so it must not overlap another one.
       return enqueuePreferenceWrite(async() => {
+        pendingWrites.add(key);
+
         try {
-          const server = await dispatch('readServer'); // There's no watch on prefs, so get before set...
+          const server = await dispatch('loadServer'); // There's no watch on prefs, so get before set...
 
           if ( server?.data ) {
             if ( definition.mangleWrite ) {
@@ -451,6 +458,8 @@ export const actions = {
 
           // Return the error
           return { type: error.type, status: error.status };
+        } finally {
+          pendingWrites.delete(key);
         }
       });
     }
@@ -499,6 +508,9 @@ export const actions = {
       commit('load', { key, value: next });
     });
 
+    // In flight from here until the reconcile has sent them.
+    list.forEach(({ key }) => pendingWrites.add(key));
+
     // Before login there's no server to reconcile against — stash so loadServer replays them post-login.
     if (!rootGetters['auth/loggedIn']) {
       list.forEach(({ key }) => {
@@ -530,17 +542,18 @@ export const actions = {
   ): Promise<PrefError | undefined> {
     const list = Array.isArray(writes) ? writes.filter((m) => m && m.key && typeof m.apply === 'function') : [];
     const serverEntries = list.filter(({ key }) => state.definitions[key]?.asUserPreference);
+    const release = () => list.forEach(({ key }) => pendingWrites.delete(key));
 
     if (!serverEntries.length || !rootGetters['auth/loggedIn']) {
+      release();
+
       return;
     }
 
-    const keys = serverEntries.map(({ key }) => key);
-
     try {
-      const server = await dispatch('readServer');
+      const server = await dispatch('loadServer');
 
-      // `readServer` swallows its own error and resolves undefined, so this is "could not read the
+      // `loadServer` swallows its own error and resolves undefined, so this is "could not read the
       // preference", not "nothing to do". Report it, or the caller counts the write as persisted.
       if ( !server?.data ) {
         return { type: 'error', status: 500 };
@@ -596,13 +609,15 @@ export const actions = {
     } catch (e) {
       // Every caller is fire-and-forget, so an unlogged failure here is invisible: the optimistic
       // commit stays in the client and the server never got it.
-      console.error('Error reconciling preferences', keys, e); // eslint-disable-line no-console
+      console.error('Error reconciling preferences', serverEntries.map(({ key }) => key), e); // eslint-disable-line no-console
 
       const error = e as PrefError;
 
       // Anything that isn't a Steve error has no `status`, and callers treat a falsy `status` as success
       // — fall back to 500 so an unexpected throw is never reported as a persisted write.
       return { type: error.type || 'error', status: error.status || 500 };
+    } finally {
+      release();
     }
   },
 
@@ -705,35 +720,6 @@ export const actions = {
     return enqueuePreferenceWrite(() => dispatch('loadServer'));
   },
 
-  /**
-   * The preference document itself, for a caller that is about to change it.
-   *
-   * Deliberately commits NOTHING. `loadServer` commits the server's value for every preference it reads,
-   * which is right when loading them but wrong in the middle of a write: a value committed optimistically
-   * for some OTHER key, still on its way to the server, would be replaced by the copy the server last saw
-   * — and the shelf would revert under the user.
-   */
-  async readServer({ dispatch }: PrefsActionContext): Promise<any> {
-    try {
-      const all = await dispatch('management/findAll', {
-        type: STEVE.PREFERENCE,
-        opt:  {
-          url:                  'userpreferences',
-          force:                true,
-          watch:                false,
-          redirectUnauthorized: false,
-          stream:               false,
-        }
-      }, { root: true });
-
-      return all?.[0];
-    } catch (e) {
-      console.error('Error loading preferences', e); // eslint-disable-line no-console
-
-      return undefined;
-    }
-  },
-
   async loadServer( {
     state, dispatch, commit, rootState, rootGetters
   }: PrefsActionContext, ignoreKey?: string | string[]) {
@@ -785,7 +771,9 @@ export const actions = {
         value = clone(server.data[definition.inheritFrom]);
       }
 
-      if ( value === undefined || ignoreKeys.includes(key)) {
+      // Skipped while this key has a write in flight: the server's copy is older than what is about to
+      // be sent, and committing it would revert the change under the user.
+      if ( value === undefined || ignoreKeys.includes(key) || pendingWrites.has(key)) {
         continue;
       }
 
